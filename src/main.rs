@@ -4,9 +4,8 @@ use anyhow::Context as _;
 use poise::serenity_prelude as serenity;
 use shuttle_runtime::SecretStore;
 use shuttle_serenity::ShuttleSerenity;
-use std::{collections::HashMap, env::var, time::Duration};
+use std::{collections::HashMap, sync::Arc};
 use tokio::sync::Mutex;
-use std::sync::Arc;
 
 struct Character {
     name: String,
@@ -46,7 +45,8 @@ async fn main(#[shuttle_runtime::Secrets] secret_store: SecretStore) -> ShuttleS
     let framework = poise::Framework::builder()
         .options(poise::FrameworkOptions {
             commands: vec![
-                character(),               
+                character(),   
+                duel(),            
                 ],
             ..Default::default()
         })
@@ -67,6 +67,24 @@ async fn main(#[shuttle_runtime::Secrets] secret_store: SecretStore) -> ShuttleS
         .map_err(shuttle_runtime::CustomError::new)?;
 
     Ok(client.into())
+}
+
+async fn autocomplete_character(
+    ctx: Context<'_>,
+    partial: &str,
+) -> impl Iterator<Item = String> {
+    let user_id = ctx.author().id;
+    let user_characters = ctx.data().user_characters.lock().await;
+
+    user_characters
+        .get(&user_id)
+        .map_or_else(Vec::new, |chars| {
+            chars.keys()
+                .filter(|name| name.to_lowercase().starts_with(&partial.to_lowercase()))
+                .cloned()
+                .collect()
+        })
+        .into_iter()
 }
 
 /// Commands related to Characters
@@ -156,24 +174,6 @@ pub async fn select(
     Ok(())
 }
 
-async fn autocomplete_character(
-    ctx: Context<'_>,
-    partial: &str,
-) -> impl Iterator<Item = String> {
-    let user_id = ctx.author().id;
-    let user_characters = ctx.data().user_characters.lock().await;
-
-    user_characters
-        .get(&user_id)
-        .map_or_else(Vec::new, |chars| {
-            chars.keys()
-                .filter(|name| name.to_lowercase().starts_with(&partial.to_lowercase()))
-                .cloned()
-                .collect()
-        })
-        .into_iter()
-}
-
 /// Deletes a Character
 #[poise::command(slash_command)]
 pub async fn delete(
@@ -191,6 +191,69 @@ pub async fn delete(
         }
     } else {
         ctx.say("You have no characters!").await?;
+    }
+
+    Ok(())
+}
+
+/// Invites another User to a Duel
+#[poise::command(slash_command)]
+pub async fn duel(ctx: Context<'_>, 
+    #[description = "User to invite to the duel"] invitee: serenity::User
+    ) -> Result<(), Error> {
+    
+    let inviter_id = ctx.author().id;
+    let invitee_id = invitee.id;
+
+    // Build the interaction response with a button to accept the duel
+    let content = format!("{} has invited {} to a duel!", ctx.author().name, invitee.name);
+
+    let reply = ctx
+        .send(poise::CreateReply::default().content(content)
+        .components(vec![
+            serenity::CreateActionRow::Buttons(vec![
+                serenity::CreateButton::new("accept")
+                    .label("Accept")
+                    .style(serenity::ButtonStyle::Success)
+                    .emoji('✔'),
+                serenity::CreateButton::new("decline")
+                    .label("Decline")
+                    .style(serenity::ButtonStyle::Danger)
+                    .emoji('✖'),
+            ])
+        ])
+    ).await?;
+
+    let interaction = reply
+        .message()
+        .await?
+        .await_component_interaction(ctx)
+        .author_id(ctx.author().id)
+        .await;
+
+    if interaction.clone().unwrap().user.id == invitee_id {
+
+        reply
+            .edit(ctx, poise::CreateReply::default().content("Processing... Please wait.").components(vec![]))
+            .await?; // remove buttons after button press and edit message
+        
+        let pressed_button_id = match &interaction {
+            Some(m) => &m.data.custom_id,
+            None => {
+                ctx.say(":warning: You didn't interact in time - please run the command again.")
+                    .await?;
+                return Ok(());
+            }
+        };
+
+        let decision = match &**pressed_button_id {
+            "acccept" => true,
+            "decline" => false,
+            other => {
+                tracing::warn!("unknown register button ID: {:?}", other);
+                return Ok(());
+            }
+        };
     }
 
     Ok(())
