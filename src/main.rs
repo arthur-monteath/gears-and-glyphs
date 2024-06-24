@@ -26,7 +26,7 @@ enum CharacterClass {
 
 // User data, which is stored and accessible in all command invocations
 struct Data {
-    user_characters: Arc<Mutex<HashMap<String, Character>>>,
+    user_characters: Arc<Mutex<HashMap<serenity::UserId, HashMap<String, Character>>>>,
 }
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
@@ -91,30 +91,107 @@ pub async fn create(ctx: Context<'_>,
         exp: 0,
     };
 
-    ctx.say(format!("Character named {} has been Created.", character.name.clone())).await?;
+    let user_id = ctx.author().id;
 
-    user_characters.insert(character.name.clone(), character);
+    let user_entry = user_characters.entry(user_id).or_insert_with(HashMap::new);
+    user_entry.insert(character.name.clone(), character);
+
+    ctx.say(format!("Character named {} has been Created.", name)).await?;
 
     Ok(())
 }
 
 /// Modifies an existing Character
 #[poise::command(slash_command)]
-pub async fn modify(ctx: Context<'_>) -> Result<(), Error> {
-    // TODO
+pub async fn modify(
+    ctx: Context<'_>,
+    #[description = "Select a character to modify"] #[autocomplete = "autocomplete_character"] character: String,
+    #[description = "New name for the character"] new_name: Option<String>,
+) -> Result<(), Error> {
+    let user_id = ctx.author().id;
+    let mut user_characters = ctx.data().user_characters.lock().await;
+
+    if let Some(user_entry) = user_characters.get_mut(&user_id) {
+        if let Some(character_selected) = user_entry.remove(&character) {
+            
+            let updated_character = Character {
+                name: new_name.clone().unwrap_or(character_selected.name),
+                class: character_selected.class,
+                exp: character_selected.exp
+            };
+            
+            let new_character_name = updated_character.name.clone();
+            user_entry.insert(new_character_name.clone(), updated_character);
+
+            ctx.say(format!("Character has been modified to {}.", new_character_name)).await?;
+        } else {
+            ctx.say("Character not found!").await?;
+        }
+    } else {
+        ctx.say("You have no characters!").await?;
+    }
+
     Ok(())
 }
 
 /// Selects a Character
 #[poise::command(slash_command)]
-pub async fn select(ctx: Context<'_>) -> Result<(), Error> {
-    // TODO
+pub async fn select(
+    ctx: Context<'_>,
+    #[description = "Select a character"] #[autocomplete = "autocomplete_character"] character: String,
+) -> Result<(), Error> {
+    let user_id = ctx.author().id;
+    let user_characters = ctx.data().user_characters.lock().await;
+
+    if let Some(user_entry) = user_characters.get(&user_id) {
+        if let Some(character_selected) = user_entry.get(&character) {
+            ctx.say(format!("You selected the character: {} who is a {:?}", character_selected.name, character_selected.class)).await?;
+        } else {
+            ctx.say("Character not found!").await?;
+        }
+    } else {
+        ctx.say("You have no characters!").await?;
+    }
+
     Ok(())
+}
+
+async fn autocomplete_character(
+    ctx: Context<'_>,
+    partial: &str,
+) -> impl Iterator<Item = String> {
+    let user_id = ctx.author().id;
+    let user_characters = ctx.data().user_characters.lock().await;
+
+    user_characters
+        .get(&user_id)
+        .map_or_else(Vec::new, |chars| {
+            chars.keys()
+                .filter(|name| name.to_lowercase().starts_with(&partial.to_lowercase()))
+                .cloned()
+                .collect()
+        })
+        .into_iter()
 }
 
 /// Deletes a Character
 #[poise::command(slash_command)]
-pub async fn delete(ctx: Context<'_>) -> Result<(), Error> {
-    // TODO
+pub async fn delete(
+    ctx: Context<'_>,
+    #[description = "Select a character to delete"] #[autocomplete = "autocomplete_character"] character: String
+) -> Result<(), Error> {
+    let user_id = ctx.author().id;
+    let mut user_characters = ctx.data().user_characters.lock().await;
+
+    if let Some(user_entry) = user_characters.get_mut(&user_id) {
+        if user_entry.remove(&character).is_some() {
+            ctx.say(format!("Character {} has been deleted.", character)).await?;
+        } else {
+            ctx.say("Character not found!").await?;
+        }
+    } else {
+        ctx.say("You have no characters!").await?;
+    }
+
     Ok(())
 }
