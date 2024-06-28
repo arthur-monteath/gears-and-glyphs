@@ -1,10 +1,13 @@
 mod character;
+mod duelingSystem;
+
+use duelingSystem::Duel;
 
 use anyhow::Context as _;
 use poise::serenity_prelude as serenity;
 use shuttle_runtime::SecretStore;
 use shuttle_serenity::ShuttleSerenity;
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, f32::consts::E, sync::Arc};
 use tokio::sync::Mutex;
 
 struct Character {
@@ -26,6 +29,7 @@ enum CharacterClass {
 // User data, which is stored and accessible in all command invocations
 struct Data {
     user_characters: Arc<Mutex<HashMap<serenity::UserId, HashMap<String, Character>>>>,
+    duels: Arc<Mutex<HashMap<serenity::UserId, Duel>>>
 }
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
@@ -56,6 +60,7 @@ async fn main(#[shuttle_runtime::Secrets] secret_store: SecretStore) -> ShuttleS
                 .context("Failed to parse 'DISCORD_GUILD_ID'")?)).await?;
                 Ok(Data {
                     user_characters: Arc::new(Mutex::new(HashMap::new())),
+                    duels: Arc::new(Mutex::new(HashMap::new())),
                 })
             })
         })
@@ -206,7 +211,7 @@ pub async fn duel(ctx: Context<'_>,
     let invitee_id = invitee.id;
 
     // Build the interaction response with a button to accept the duel
-    let content = format!("{} has invited {} to a duel!", ctx.author().name, invitee.name);
+    let content = format!("<@{}> has invited <@{}> to a duel!", ctx.author().id, invitee.id);
 
     let reply = ctx
         .send(poise::CreateReply::default().content(content)
@@ -228,33 +233,60 @@ pub async fn duel(ctx: Context<'_>,
         .message()
         .await?
         .await_component_interaction(ctx)
-        .author_id(ctx.author().id)
+        .author_id(invitee_id)
         .await;
-
-    if interaction.clone().unwrap().user.id == invitee_id {
-
-        reply
-            .edit(ctx, poise::CreateReply::default().content("Processing... Please wait.").components(vec![]))
-            .await?; // remove buttons after button press and edit message
+    
+    reply
+        .edit(ctx, poise::CreateReply::default().content("Processing... Please wait.").components(vec![]))
+        .await?; // remove buttons after button press and edit message
         
-        let pressed_button_id = match &interaction {
-            Some(m) => &m.data.custom_id,
-            None => {
-                ctx.say(":warning: You didn't interact in time - please run the command again.")
-                    .await?;
-                return Ok(());
-            }
-        };
+    let pressed_button_id = match &interaction {
+        Some(m) => &m.data.custom_id,
+        None => {
+            ctx.say(":warning: You didn't interact in time - please run the command again.").await?;
+            return Ok(());
+        }
+    };
 
-        let decision = match &**pressed_button_id {
-            "acccept" => true,
-            "decline" => false,
-            other => {
-                tracing::warn!("unknown register button ID: {:?}", other);
-                return Ok(());
-            }
-        };
+    let decision = match &**pressed_button_id {
+        "accept" => true,
+        "decline" => false,
+        other => {
+            tracing::warn!("unknown register button ID: {:?}", other);
+            return Ok(());
+        }
+    };
+
+    if decision
+    {
+        let mut duels = ctx.data().duels.lock().await;
+
+        let new_duel = Duel::new(inviter_id, invitee_id);
+
+        duels.insert(inviter_id, new_duel);
+
+        let board = duels.get(&inviter_id).unwrap().get_board();
+
+        reply.edit(ctx, poise::CreateReply::default().content(board).components(vec![
+            serenity::CreateActionRow::Buttons(vec![
+                serenity::CreateButton::new("atk")
+                    .label("Attack")
+                    .style(serenity::ButtonStyle::Danger)
+                    .emoji('⚔'),
+                serenity::CreateButton::new("mov")
+                    .label("Move")
+                    .style(serenity::ButtonStyle::Success)
+                    .emoji('🏃'),
+                serenity::CreateButton::new("use")
+                    .label("Use")
+                    .style(serenity::ButtonStyle::Primary)
+                    .emoji('✍'),
+        ])])).await?;
+
+        return Ok(())
     }
+    
+    reply.edit(ctx, poise::CreateReply::default().content("Duel declined.").components(vec![])).await?;
 
     Ok(())
 }
