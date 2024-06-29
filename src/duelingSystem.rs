@@ -47,12 +47,13 @@ impl Duel {
         return self.board.get_string()
     }
 
-    pub fn play(player: bool, action: Action) {
+    pub fn input_action(&mut self, player: bool, action: Action, tile: String) 
+    -> Result<(), String>{
 
         match action {
-            Action::Attack => return,
-            Action::Move => return,
-            Action::Use => return,
+            Action::Attack => Ok(()),
+            Action::Move => self.board.move_player(player, &tile),
+            Action::Use => Ok(()),
         }
     }
 }
@@ -116,7 +117,7 @@ impl Board {
             for &tile in row {
                 let tile_str = match tile {
                     Slot::Player1 => ":sunglasses:",
-                    Slot::Player2 => ":sunglasses:",
+                    Slot::Player2 => ":nerd:",
                     Slot::Empty => ":brown_square:",
                     Slot::Trap => ":brown_square:",
                     Slot::Wall => ":black_large_square:",
@@ -155,13 +156,14 @@ impl Board {
             if distance > 4 {
                 return Err("Position is too far!".to_string());
             }
-        }
 
-        // Plus, check if the tile player is trying to move is slot::Empty
+            self.tiles[cur_row][cur_col] = Slot::Empty;
+            self.tiles[row][col] = if player { Slot::Player1 } else { Slot::Player2 };
 
-        self.tiles[row][col] = if player { Slot::Player1 } else { Slot::Player2 };
+            return Ok(());
+        }      
 
-        return Ok(());
+        return Err("Player was not found on the board!".to_string());
     }
 
     fn find_player(&self, player: bool) -> Option<(usize, usize)> {
@@ -180,7 +182,7 @@ impl Board {
 #[derive(Clone, Copy, PartialEq)]
 enum Slot { // Use the commands as what they should be as String
     Player1,// :sunglasses:
-    Player2,// :sunglasses:
+    Player2,// :nerd:
     Empty,  // :brown_square:
     Trap,   // :brown_square:
     Wall,   // :black_large_square:

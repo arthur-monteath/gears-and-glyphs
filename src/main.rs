@@ -2,18 +2,26 @@ mod character;
 mod duelingSystem;
 
 use duelingSystem::Duel;
+use duelingSystem::Action;
 
 use anyhow::Context as _;
+use poise::CreateReply;
+use poise::ReplyHandle;
 use poise::{reply, Modal, serenity_prelude as serenity};
 use serenity::all::{CreateInteractionResponse, InteractionType};
 use shuttle_runtime::SecretStore;
 use shuttle_serenity::ShuttleSerenity;
-use std::{collections::HashMap, f32::consts::E, sync::Arc};
+use std::borrow::BorrowMut;
+use std::{collections::HashMap, f32::consts::E, sync::Arc, time::Duration};
 use tokio::sync::Mutex;
 
 #[derive(Modal)]
+#[name = "You have 10 seconds to submit"]
 struct ActionModal {
-    #[name = "Tile Input"]
+    #[name = "What tile?"]
+    #[placeholder = "A1"]
+    #[min_length = 2]
+    #[max_length = 3]
     tile: String,
 }
 
@@ -36,7 +44,6 @@ enum CharacterClass {
 // User data, which is stored and accessible in all command invocations
 struct Data {
     user_characters: Arc<Mutex<HashMap<serenity::UserId, HashMap<String, Character>>>>,
-    duels: Arc<Mutex<HashMap<serenity::UserId, Duel>>>
 }
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
@@ -67,7 +74,6 @@ async fn main(#[shuttle_runtime::Secrets] secret_store: SecretStore) -> ShuttleS
                 .context("Failed to parse 'DISCORD_GUILD_ID'")?)).await?;
                 Ok(Data {
                     user_characters: Arc::new(Mutex::new(HashMap::new())),
-                    duels: Arc::new(Mutex::new(HashMap::new())),
                 })
             })
         })
@@ -266,24 +272,30 @@ pub async fn duel(ctx: Context<'_>,
 
     if decision
     {
-        let mut duels = ctx.data().duels.lock().await;
+        let mut duel = Duel::new(inviter_id, invitee_id);
 
-        let new_duel = Duel::new(inviter_id, invitee_id);
-
-        duels.insert(inviter_id, new_duel);
-
-        let board = duels.get(&inviter_id).unwrap().get_board();
+        let board = duel.get_board();
 
         reply.edit(ctx, poise::CreateReply::default().content(board).components(vec![])).await?;
 
         // Start the turn loop
         let mut current_player = inviter_id;
+        let msg = ctx.say("Processing... Please wait.").await?;
+        let mut err = "".to_string();
+
         loop {
-            if let Err(e) = send_turn_message(ctx, current_player).await {
-                ctx.say(format!("Error: {}", e)).await?;
-                break;
+            let (action, tile) = send_turn_message(ctx, &msg, current_player, err.clone()).await?;
+
+            match duel.input_action(current_player == inviter_id, action, tile) {
+                Ok(_) => {
+                    reply.edit(ctx, CreateReply::default().content(duel.get_board())).await?
+                }, Err(e) => {
+                    err = e + "\n"; continue;
+                }
             }
             
+            err = "".to_string();
+
             // Alternate turns
             current_player = if current_player == inviter_id { invitee_id } else { inviter_id };
         }
@@ -296,82 +308,71 @@ pub async fn duel(ctx: Context<'_>,
     Ok(())
 }
 
-async fn send_turn_message(ctx: Context<'_>, player_id: serenity::UserId) -> Result<(String, String), Error> {
-    let reply = ctx.send(poise::CreateReply::default().ephemeral(true).content("Your turn! Choose an action:")
-        .components(vec![
-            serenity::CreateActionRow::Buttons(vec![
-                serenity::CreateButton::new("atk")
-                    .label("Attack")
-                    .style(serenity::ButtonStyle::Danger)
-                    .emoji('⚔'),
-                serenity::CreateButton::new("mov")
-                    .label("Move")
-                    .style(serenity::ButtonStyle::Success)
-                    .emoji('🏃'),
-                serenity::CreateButton::new("use")
-                    .label("Use")
-                    .style(serenity::ButtonStyle::Primary)
-                    .emoji('✍'),
-            ])
-        ])
+async fn send_turn_message(ctx: Context<'_>, reply: &ReplyHandle<'_>, player_id: serenity::UserId, err: String) -> Result<(Action, String), Error> {
+    
+    let buttons = vec![
+        serenity::CreateActionRow::Buttons(vec![
+            serenity::CreateButton::new("atk")
+                .label("Attack")
+                .style(serenity::ButtonStyle::Danger)
+                .emoji('⚔'),
+            serenity::CreateButton::new("mov")
+                .label("Move")
+                .style(serenity::ButtonStyle::Success)
+                .emoji('🏃'),
+            serenity::CreateButton::new("use").disabled(true)
+                .label("Use")
+                .style(serenity::ButtonStyle::Primary)
+                .emoji('✍'),
+        ])];
+
+    reply.edit(ctx, CreateReply::default().content(format!("{}<@{}>'s turn! Choose an action:", err, player_id))
+        .components(buttons.clone())
     ).await?;
 
-    if let Some(interaction) = reply
-        .message()
-        .await?
-        .await_component_interaction(ctx)
-        .author_id(player_id)
-        .await
+    loop {
+
+        if let Some(interaction) = reply
+            .message()
+            .await?
+            .await_component_interaction(ctx)
+            .author_id(player_id)
+            .await
         {
             let action = match interaction.data.custom_id.as_str() {
-                "atk" => "Attack",
-                "mov" => "Move",
-                "use" => "Use",
-                _ => return Ok(("Attack".to_string(), "A1".to_string())), // Unexpected button id
+                "atk" => Action::Attack,
+                "mov" => Action::Move,
+                "use" => Action::Use,
+                _ => return Ok((Action::Attack, "A1".to_string())), // Unexpected button id
             };
 
-            // Create and show the modal in response to the button interaction
-            let modal = serenity::CreateInteractionResponse::Modal(serenity::CreateModal::new(
-            "action_modal",
-            format!("Where do you want {} to take place?", action))
-            .components(vec![
-                serenity::CreateActionRow::InputText(serenity::CreateInputText::new(
-                    serenity::InputTextStyle::Short,
-                    "Where?",
-                    "tile_input")
-                    .placeholder("A1")
-                    .required(true)
-                    )
-                ])
-            );
+            reply.edit(ctx, poise::CreateReply::default()
+                .content("...".to_string())
+                .components(vec![])).await?;
 
-            // Respond with the modal
-            interaction.create_response(&ctx.http(), modal).await?;
-
-            // Await the modal submission using event system
-            let interaction_token = interaction.token.clone();
-
-            if let Some(modal_submission) = serenity::ModalInteractionCollector::new(ctx)
-            .author_id(player_id)
-            .timeout(std::time::Duration::from_secs(60))
-            .filter(move |modal| modal.token == interaction_token)
-            .await
+            // Show the modal in response to the button interaction and wait for a response
+            match poise::execute_modal_on_component_interaction::<ActionModal>(
+                ctx, 
+                interaction, 
+                None, 
+                Some(Duration::from_secs(10)))
+                .await
             {
-                // Extract the input value from the modal submission
-                if let Some(action_input) = modal_submission.data.components.get(0)
-                .and_then(|row| row.components.get(0))
-                .and_then(|component| {
-                if let serenity::ActionRowComponent::InputText(input) = component {
-                    Some(&input.value)
-                } else {
-                    None
+                Ok(Some(modal)) => {
+                    // Modal received successfully, return the action and tile
+                    return Ok((action, modal.tile));
+                },
+                Ok(None) => {
+                    // Modal was cancelled, inform the user and let them retry
+                    reply.edit(ctx, poise::CreateReply::default()
+                        .content(format!("No response received, try again.\n<@{}>'s turn! Choose an action:", player_id)).components(buttons.clone())).await?;
+                },
+                Err(e) => {
+                    // Handle any other errors
+                    reply.edit(ctx, poise::CreateReply::default()
+                        .content(format!("An error occurred: {}\n<@{}>'s turn! Choose an action:", e, player_id)).components(buttons.clone())).await?;
                 }
-            })
-            {
-                return Ok((action.to_string(),action_input.clone().unwrap_or("A1".to_string())));
             }
         }
     }
-
-    return Ok(("Attack".to_string(), "A1".to_string()));
 }
